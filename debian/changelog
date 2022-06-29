@@ -1,3 +1,21 @@
+gstreamer1.0-rockchip (1.14-4ubuntu2.2firefly3) focal; urgency=medium
+
+  * Firefly release
+
+ -- Jeffy Chen <jeffy.chen@rock-chips.com>  Wed, 29 Jun 2022 08:41:41 +0000
+
+gstreamer1.0-rockchip (1.14-4ubuntu2.2firefly2) focal; urgency=medium
+
+  * Firefly release
+
+ -- Jeffy Chen <jeffy.chen@rock-chips.com>  Wed, 29 Jun 2022 08:41:39 +0000
+
+gstreamer1.0-rockchip (1.14-4ubuntu2.2firefly1) focal; urgency=medium
+
+  * Firefly release
+
+ -- Jeffy Chen <jeffy.chen@rock-chips.com>  Wed, 29 Jun 2022 08:41:38 +0000
+
 gstreamer1.0-rockchip (1.14-4) stable; urgency=medium
 
   * mppdec: Sort functions
