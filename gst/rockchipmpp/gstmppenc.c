@@ -137,18 +137,6 @@ gst_mpp_enc_format_supported (MppFrameFormat format)
 gboolean
 gst_mpp_enc_supported (MppCodingType mpp_type)
 {
-  MppCtx mpp_ctx;
-  MppApi *mpi;
-
-  if (mpp_create (&mpp_ctx, &mpi))
-    return FALSE;
-
-  if (mpp_init (mpp_ctx, MPP_CTX_ENC, mpp_type)) {
-    mpp_destroy (mpp_ctx);
-    return FALSE;
-  }
-
-  mpp_destroy (mpp_ctx);
   return TRUE;
 }
 
