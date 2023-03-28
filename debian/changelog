@@ -1,0 +1,6 @@
+gstreamer1.0-rockchip (1.14-1) focal; urgency=medium
+
+  * Add debian build support
+
+ -- Detlev Casanova <detlev.casanova@collabora.com>  Tue, 28 Mar 2023 10:35:41 -0400
+
