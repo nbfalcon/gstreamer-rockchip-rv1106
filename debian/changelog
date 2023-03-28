@@ -1,4 +1,4 @@
-gstreamer1.0-rockchip (1.14-1) focal; urgency=medium
+gstreamer1.0-rockchip (1.14-0+co1) focal; urgency=medium
 
   * Add debian build support
 
