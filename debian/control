@@ -11,6 +11,6 @@ Vcs-Git: https://github.com/rockchip-linux/gstreamer-rockchip
 Vcs-Browser: https://github.com/rockchip-linux/gstreamer-rockchip
 
 Package: gstreamer1.0-rockchip1
-Architecture: arm64
+Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: The Gstreamer plugins for Rockchip platforms.
