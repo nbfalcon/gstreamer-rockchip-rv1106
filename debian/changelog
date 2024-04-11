@@ -1,3 +1,9 @@
+gstreamer1.0-rockchip (1.14-0+co4) focal; urgency=medium
+
+  * Debian: Allow multi arch installation
+
+ -- Detlev Casanova <detlev.casanova@collabora.com>  Thu, 11 Apr 2024 10:24:17 -0500
+
 gstreamer1.0-rockchip (1.14-0+co3) focal; urgency=medium
 
   * Debian: Build for any architecture
