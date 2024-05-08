@@ -1,3 +1,10 @@
+gstreamer1.0-rockchip (1.14-20240508-0+co1) rk5588; urgency=medium
+
+  * Update to upstream commit 4d8322cd18c7
+  * Fix stream resolution change support
+
+ -- Detlev Casanova <detlev.casanova@collabora.com>  Wed, 08 May 2024 11:10:17 -0500
+
 gstreamer1.0-rockchip (1.14-0+co4) focal; urgency=medium
 
   * Debian: Allow multi arch installation
