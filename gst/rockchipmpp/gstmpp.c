@@ -492,6 +492,10 @@ gst_mpp_get_pixel_stride (GstVideoInfo * info)
   return hstride / format->pixel_stride0;
 }
 
+gboolean rkaiqsrc_plugin_register(GstPlugin *plugin);
+gboolean gst_rgaconvert_plugin_register(GstPlugin *plugin);
+gboolean gst_rkmpih264_plugin_register(GstPlugin *plugin);
+
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
@@ -504,6 +508,10 @@ plugin_init (GstPlugin * plugin)
 
   gst_mpp_video_dec_register (plugin, GST_RANK_PRIMARY + 1);
   gst_mpp_jpeg_dec_register (plugin, GST_RANK_PRIMARY + 1);
+
+  rkaiqsrc_plugin_register(plugin);
+  gst_rgaconvert_plugin_register(plugin);
+  gst_rkmpih264_plugin_register(plugin);
 
 #ifdef USE_VPXALPHADEC
   gst_mpp_vpx_alpha_decode_bin_register (plugin,

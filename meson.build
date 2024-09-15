@@ -83,10 +83,10 @@ gstpbutils_dep = dependency('gstreamer-pbutils-1.0', version : gst_req,
 
 glib_dep = dependency('glib-2.0', version : glib_req,
   fallback : ['glib', 'libglib_dep'])
-x11_dep = dependency('x11', required : get_option('rkximage'))
-drm_dep = dependency('libdrm', required : get_option('rkximage'))
-mpp_dep = dependency('rockchip_mpp', required : get_option('rockchipmpp'))
-rga_dep = dependency('librga', required : get_option('rga'))
+# x11_dep = dependency('x11', required : get_option('rkximage'))
+# drm_dep = dependency('libdrm', required : get_option('rkximage'))
+# mpp_dep = dependency('rockchip_mpp', required : get_option('rockchipmpp'))
+# rga_dep = dependency('librga', required : get_option('rga'))
 
 if rga_dep.found() and not get_option('rga').disabled()
   cdata.set('HAVE_RGA', 1)

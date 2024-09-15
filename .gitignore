@@ -67,3 +67,6 @@ Build
 
 /build
 /subprojects
+
+.cache
+compile_commands.json
