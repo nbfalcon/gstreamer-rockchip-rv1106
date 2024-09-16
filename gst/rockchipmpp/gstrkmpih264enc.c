@@ -20,7 +20,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "gstmppenc.h"
 #include "rk_mpi_mb.h"
 #include "rk_mpi_sys.h"
 #include "rk_mpi_venc.h"
@@ -37,8 +36,6 @@ GST_DEBUG_CATEGORY(GST_CAT_DEFAULT);
 typedef struct _GstRKMPIH264Enc GstRKMPIH264Enc;
 typedef struct _GstRKMPIH264EncClass GstRKMPIH264EncClass;
 
-#define width 720
-#define height 480
 #define chnId 0
 
 struct _GstRKMPIH264Enc {
@@ -188,33 +185,73 @@ static gboolean gst_rkmpi_h264_enc_start(GstVideoEncoder *encoder) {
   rkret = RK_MPI_SYS_Init();
   RK_MPI_ERROR_CHECK2(RK_MPI_SYS_Init)
 
-  MB_POOL_CONFIG_S PoolCfg;
-  memset(&PoolCfg, 0, sizeof(MB_POOL_CONFIG_S));
-  PoolCfg.u64MBSize = 1024 * 1024 * 16;
-  PoolCfg.u32MBCnt = 1;
-  PoolCfg.enAllocType = MB_ALLOC_TYPE_DMA;
-  // PoolCfg.bPreAlloc = RK_FALSE;
-  self->src_Pool = RK_MPI_MB_CreatePool(&PoolCfg);
-  RK_MPI_ERROR_CHECK_NULL(self->src_Pool, RK_MPI_MB_CreatePool)
-  
   gst_video_info_init(&self->info);
 
   return TRUE;
+}
+
+static gboolean gst_gst2rkmpi_format(PIXEL_FORMAT_E *outFormat,
+                                     GstVideoFormat inFormat) {
+  for (int i = 0; i < COUNTOF(GST_RKMPI_FORMAT_ALIST); i++) {
+    if (GST_RKMPI_FORMAT_ALIST[i].gst_format == inFormat) {
+      *outFormat = GST_RKMPI_FORMAT_ALIST[i].rkmpi_format;
+      return TRUE;
+    }
+  }
+  gst_printerrln("Cannot handle video format '%d' (RKMPI does not support it)",
+                 inFormat);
+  return FALSE;
+}
+
+static gboolean gst_rkmpi_enc_set_src_caps(GstVideoEncoder *encoder,
+                                           const char *media_type) {
+  GstRKMPIH264Enc *self = GST_RKMPIH264ENC(encoder);
+  GstVideoInfo *info = &self->info;
+  GstVideoCodecState *output_state;
+
+  GstCaps *caps = gst_caps_new_empty_simple(media_type);
+  gst_caps_set_simple(caps, "width", G_TYPE_INT, GST_VIDEO_INFO_WIDTH(info),
+                      "height", G_TYPE_INT, GST_VIDEO_INFO_HEIGHT(info), NULL);
+
+  GST_DEBUG_OBJECT(self, "output caps: %" GST_PTR_FORMAT, caps);
+
+  output_state = gst_video_encoder_set_output_state(encoder, caps, self->state);
+
+  GST_VIDEO_INFO_WIDTH(&output_state->info) = GST_VIDEO_INFO_WIDTH(info);
+  GST_VIDEO_INFO_HEIGHT(&output_state->info) = GST_VIDEO_INFO_HEIGHT(info);
+  gst_video_codec_state_unref(output_state);
+
+  return gst_video_encoder_negotiate(encoder);
 }
 
 static gboolean gst_rkmpi_h264_enc_set_format(GstVideoEncoder *encoder,
                                               GstVideoCodecState *state) {
   GstRKMPIH264Enc *self = GST_RKMPIH264ENC(encoder);
 
-  printf("%s\n", __func__);
-  VENC_RECV_PIC_PARAM_S stRecvParam;
+  self->state = gst_video_codec_state_ref(state);
+  self->info = state->info;
+  self->frameCounter = 0;
+
+  const RK_U32 width = GST_VIDEO_INFO_WIDTH(&self->info),
+         height = GST_VIDEO_INFO_HEIGHT(&self->info);
+
+  MB_POOL_CONFIG_S pool_cfg;
+  memset(&pool_cfg, 0, sizeof(MB_POOL_CONFIG_S));
+  pool_cfg.u64MBSize = width * height * 3;
+  pool_cfg.u32MBCnt = 1;
+  pool_cfg.enAllocType = MB_ALLOC_TYPE_DMA;
+  // PoolCfg.bPreAlloc = RK_FALSE;
+  self->src_Pool = RK_MPI_MB_CreatePool(&pool_cfg);
+  RK_MPI_ERROR_CHECK_NULL(self->src_Pool, RK_MPI_MB_CreatePool)
+  self->src_Blk = RK_MPI_MB_GetMB(self->src_Pool, width * height * 3, RK_TRUE);
+  self->src_BlkVir = RK_MPI_MB_Handle2VirAddr(self->src_Blk);
+
   VENC_CHN_ATTR_S stAttr;
   memset(&stAttr, 0, sizeof(VENC_CHN_ATTR_S));
-
-  // RTSP H264
   stAttr.stVencAttr.enType = RK_VIDEO_ID_AVC;
-  // stAttr.stVencAttr.enPixelFormat = RK_FMT_YUV420SP;
-  stAttr.stVencAttr.enPixelFormat = RK_FMT_RGB888;
+  if (!gst_gst2rkmpi_format(&stAttr.stVencAttr.enPixelFormat,
+                            GST_VIDEO_INFO_FORMAT(&self->info)))
+    return FALSE;
   stAttr.stVencAttr.u32Profile = H264E_PROFILE_MAIN;
   stAttr.stVencAttr.u32PicWidth = width;
   stAttr.stVencAttr.u32PicHeight = height;
@@ -229,28 +266,16 @@ static gboolean gst_rkmpi_h264_enc_set_format(GstVideoEncoder *encoder,
   stAttr.stRcAttr.stH264Cbr.u32Gop = 1;
   RK_MPI_VENC_CreateChn(chnId, &stAttr);
 
+  VENC_RECV_PIC_PARAM_S stRecvParam;
   memset(&stRecvParam, 0, sizeof(VENC_RECV_PIC_PARAM_S));
   stRecvParam.s32RecvPicNum = -1;
   RK_MPI_VENC_StartRecvFrame(chnId, &stRecvParam);
-
-  self->src_Blk = RK_MPI_MB_GetMB(self->src_Pool, width * height * 3, RK_TRUE);
-
-  // Build h264_frame
-  VIDEO_FRAME_INFO_S h264_frame;
-  h264_frame.stVFrame.u32Width = width;
-  h264_frame.stVFrame.u32Height = height;
-  h264_frame.stVFrame.u32VirWidth = width;
-  h264_frame.stVFrame.u32VirHeight = height;
-  h264_frame.stVFrame.enPixelFormat = RK_FMT_RGB888;
-  h264_frame.stVFrame.u32FrameFlag = 160;
-  h264_frame.stVFrame.pMbBlk = self->src_Blk;
-  self->src_BlkVir = RK_MPI_MB_Handle2VirAddr(self->src_Blk);
 
   self->frameCounter = 0;
   self->state = gst_video_codec_state_ref(state);
   self->info = state->info;
 
-  return gst_mpp_enc_set_src_caps(encoder, gst_caps_new_empty_simple("video/x-h264"));
+  return gst_rkmpi_enc_set_src_caps(encoder, "video/x-h264");
 }
 
 static gboolean gst_rkmpi_h264_enc_stop(GstVideoEncoder *encoder) {
@@ -271,12 +296,16 @@ static GstFlowReturn gst_rkmpi_h264_handle_frame(GstVideoEncoder *encoder,
   // FIXME: sync
   gst_buffer_unmap(gstFrame->input_buffer, &inputMapInfo);
 
+  RK_U32 width = GST_VIDEO_INFO_WIDTH(&self->info),
+         height = GST_VIDEO_INFO_HEIGHT(&self->info);
   VIDEO_FRAME_INFO_S h264_frame;
   h264_frame.stVFrame.u32Width = width;
   h264_frame.stVFrame.u32Height = height;
   h264_frame.stVFrame.u32VirWidth = width;
   h264_frame.stVFrame.u32VirHeight = height;
-  h264_frame.stVFrame.enPixelFormat = RK_FMT_RGB888;
+  if (!gst_gst2rkmpi_format(&h264_frame.stVFrame.enPixelFormat,
+                            GST_VIDEO_INFO_FORMAT(&self->info)))
+    return FALSE;
   h264_frame.stVFrame.u32FrameFlag = 160;
   h264_frame.stVFrame.pMbBlk = self->src_Blk;
   h264_frame.stVFrame.u32TimeRef = self->frameCounter++;
@@ -286,8 +315,8 @@ static GstFlowReturn gst_rkmpi_h264_handle_frame(GstVideoEncoder *encoder,
   RK_MPI_ERROR_CHECK(RK_MPI_VENC_SendFrame)
 
   // Get response bitstream
-  VENC_STREAM_S stFrame;	
-	stFrame.pstPack = (VENC_PACK_S *)malloc(sizeof(VENC_PACK_S));
+  VENC_STREAM_S stFrame;
+  stFrame.pstPack = (VENC_PACK_S *)malloc(sizeof(VENC_PACK_S));
   rkret = RK_MPI_VENC_GetStream(0, &stFrame, -1);
   RK_MPI_ERROR_CHECK(RK_MPI_VENC_GetStream)
 
