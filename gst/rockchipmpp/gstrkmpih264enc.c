@@ -21,13 +21,13 @@
 #include <string.h>
 
 #include "rk_mpi_mb.h"
-#include "rk_mpi_venc.h"
 #include "rk_mpi_sys.h"
+#include "rk_mpi_venc.h"
 
-static uint64_t monotonic_millis() {
+static uint64_t monotonic_micros() {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (uint64_t)(ts.tv_sec * 1000) + (ts.tv_nsec / 1000000);
+  return (uint64_t)(ts.tv_sec * 1000 * 1000) + (ts.tv_nsec / 1000);
 }
 
 #define GST_CAT_DEFAULT gstrkpmpih264
@@ -89,9 +89,9 @@ static GstStaticPadTemplate gst_rkmpi_h264enc_src_template =
 static GstStaticPadTemplate gst_rkmpih264_enc_sink_template =
     GST_STATIC_PAD_TEMPLATE(
         "sink", GST_PAD_SINK, GST_PAD_ALWAYS,
-        GST_STATIC_CAPS(
-            "video/x-raw,"
-            "format = (string) { NV24, Y444 }, " GST_RKMPI_H264ENC_SIZE_CAPS));
+        GST_STATIC_CAPS("video/x-raw,"
+                        "format = (string) { RGB, NV24, Y444 "
+                        "}, " GST_RKMPI_H264ENC_SIZE_CAPS));
 
 static void gst_rkmpi_h264enc_init(GstRKMPIH264Enc *element) {
   GstRKMPIH264Enc *self = GST_RKMPIH264ENC(element);
@@ -162,8 +162,45 @@ static struct gst_rkmpi_format {
 };
 
 #define COUNTOF(x) (sizeof(x) / sizeof((x)[0]))
-#define RK_MPI_ERROR_CHECK(name) if (rkret != RK_SUCCESS) { fprintf(stderr, "rockit MPI: %s failed (%d)\n", #name, rkret); return GST_FLOW_ERROR; }
-#define RK_MPI_ERROR_CHECK2(name) if (rkret != RK_SUCCESS) { fprintf(stderr, "rockit MPI: %s failed (%d)\n", #name, rkret); return FALSE; }
+#define RK_MPI_ERROR_CHECK(name)                                               \
+  if (rkret != RK_SUCCESS) {                                                   \
+    fprintf(stderr, "rockit MPI: %s failed (%d)\n", #name, rkret);             \
+    return GST_FLOW_ERROR;                                                     \
+  }
+#define RK_MPI_ERROR_CHECK2(name)                                              \
+  if (rkret != RK_SUCCESS) {                                                   \
+    fprintf(stderr, "rockit MPI: %s failed (%d)\n", #name, rkret);             \
+    return FALSE;                                                              \
+  }
+#define RK_MPI_ERROR_CHECK_NULL(v, name)                                       \
+  if (v) {                                                                     \
+    fprintf(stderr, "rockit MPI: %s returned NULL!\n", #name);                 \
+    return FALSE;                                                              \
+  }
+
+static gboolean gst_rkmpi_h264_enc_start(GstVideoEncoder *encoder) {
+  GstRKMPIH264Enc *self = GST_RKMPIH264ENC(encoder);
+
+  RK_S32 rkret;
+  // FIXME: shuffle this to ->prepare() (or whatever the READY callback is
+  // called)
+  rkret = RK_MPI_SYS_Init();
+  RK_MPI_ERROR_CHECK2(RK_MPI_SYS_Init)
+
+  self->frameCounter = 0;
+  gst_video_info_init(&self->info);
+
+  MB_POOL_CONFIG_S PoolCfg;
+  memset(&PoolCfg, 0, sizeof(MB_POOL_CONFIG_S));
+  PoolCfg.u64MBSize = 1024 * 1024 * 16;
+  PoolCfg.u32MBCnt = 1;
+  PoolCfg.enAllocType = MB_ALLOC_TYPE_DMA;
+  // PoolCfg.bPreAlloc = RK_FALSE;
+  self->imagePool = RK_MPI_MB_CreatePool(&PoolCfg);
+  RK_MPI_ERROR_CHECK_NULL(self->imagePool, RK_MPI_MB_CreatePool)
+
+  return TRUE;
+}
 
 static gboolean gst_rkmpi_h264_enc_set_format(GstVideoEncoder *encoder,
                                               GstVideoCodecState *state) {
@@ -207,33 +244,15 @@ static gboolean gst_rkmpi_h264_enc_set_format(GstVideoEncoder *encoder,
   stAttr->stVencAttr.u32StreamBufCnt = 2;
   stAttr->stVencAttr.u32BufSize = self->info.size;
 
-  return TRUE;
-}
-
-static gboolean gst_rkmpi_h264_enc_start(GstVideoEncoder *encoder) {
-  GstRKMPIH264Enc *self = GST_RKMPIH264ENC(encoder);
-  
-  RK_S32 rkret;
-  // FIXME: shuffle this to ->prepare() (or whatever the READY callback is called)
-  rkret = RK_MPI_SYS_Init();
-  RK_MPI_ERROR_CHECK2(RK_MPI_SYS_Init)
-
-  self->frameCounter = 0;
-  gst_video_info_init(&self->info);
-
-  MB_POOL_CONFIG_S PoolCfg;
-  memset(&PoolCfg, 0, sizeof(MB_POOL_CONFIG_S));
-  PoolCfg.u64MBSize = 1024 * 1024 * 16;
-  PoolCfg.u32MBCnt = 1;
-  PoolCfg.enAllocType = MB_ALLOC_TYPE_DMA;
-  // PoolCfg.bPreAlloc = RK_FALSE;
-  self->imagePool = RK_MPI_MB_CreatePool(&PoolCfg);
-
-  RK_MPI_VENC_CreateChn(self->chnId, &self->stAttr);
+  // FIXME: kill previous MPI VencChn if exists.
+  RK_S32 rkret = 0;
+  rkret = RK_MPI_VENC_CreateChn(self->chnId, &self->stAttr);
+  RK_MPI_ERROR_CHECK2(RK_MPI_VENC_CreateChn)
   VENC_RECV_PIC_PARAM_S stRecvParam;
   memset(&stRecvParam, 0, sizeof(VENC_RECV_PIC_PARAM_S));
   stRecvParam.s32RecvPicNum = -1;
-  RK_MPI_VENC_StartRecvFrame(self->chnId, &stRecvParam);
+  rkret = RK_MPI_VENC_StartRecvFrame(self->chnId, &stRecvParam);
+  RK_MPI_ERROR_CHECK2(RK_MPI_VENC_StartRecvFrame)
 
   return TRUE;
 }
@@ -270,37 +289,38 @@ static GstFlowReturn gst_rkmpi_h264_handle_frame(GstVideoEncoder *encoder,
   memset(&frame, 0, sizeof(VIDEO_FRAME_INFO_S));
   frame.stVFrame.enField = VIDEO_FIELD_FRAME;
   frame.stVFrame.enVideoFormat = VIDEO_FORMAT_LINEAR;
-  frame.stVFrame.enPixelFormat = RK_FMT_RGB565;
+  frame.stVFrame.enPixelFormat = self->stAttr.stVencAttr.enPixelFormat;
   frame.stVFrame.enCompressMode = COMPRESS_MODE_NONE;
   frame.stVFrame.enDynamicRange = DYNAMIC_RANGE_SDR8;
   frame.stVFrame.enColorGamut = COLOR_GAMUT_BT601;
-  frame.stVFrame.pVirAddr[0] = src_Blk;
-  frame.stVFrame.pVirAddr[1] = NULL;
+  frame.stVFrame.pMbBlk = src_Blk;
 
   frame.stVFrame.u32TimeRef = self->frameCounter++;
-  frame.stVFrame.u64PTS = monotonic_millis();
+  frame.stVFrame.u64PTS = monotonic_micros();
 
   frame.stVFrame.u64PrivateData = 0;
-  frame.stVFrame.u32FrameFlag = 0;
-  // FIXME: error check
+  frame.stVFrame.u32FrameFlag = 160;
   rkret = RK_MPI_VENC_SendFrame(self->chnId, &frame, -1);
   RK_MPI_ERROR_CHECK(RK_MPI_VENC_SendFrame)
 
   // Get response bitstream
   VENC_STREAM_S response;
   response.pstPack = (VENC_PACK_S *)malloc(sizeof(VENC_PACK_S));
-  rkret = RK_MPI_VENC_GetStream(self->chnId, &response, -1);
+  rkret = RK_MPI_VENC_GetStream(self->chnId, &response, 10);
   RK_MPI_ERROR_CHECK(RK_MPI_VENC_GetStream)
 
   // Output to new buffer
-  if (GST_FLOW_OK != gst_video_encoder_allocate_output_frame(encoder, gstFrame, response.pstPack->u32Len))
+  if (GST_FLOW_OK != gst_video_encoder_allocate_output_frame(
+                         encoder, gstFrame, response.pstPack->u32Len))
     return FALSE; // FIXME: unmap, error logging
   GstMapInfo outputMapInfo;
-  if (!gst_buffer_map(gstFrame->output_buffer, &outputMapInfo, GST_MAP_WRITE)) 
+  if (!gst_buffer_map(gstFrame->output_buffer, &outputMapInfo, GST_MAP_WRITE))
     return FALSE; // FIXME: error check
   void *response_data = RK_MPI_MB_Handle2VirAddr(response.pstPack->pMbBlk);
   memcpy(outputMapInfo.data, response_data, response.pstPack->u32Len);
   // FIXME: dma_buf_sync??
+  rkret = RK_MPI_VENC_ReleaseStream(self->chnId, &response);
+  RK_MPI_ERROR_CHECK(RK_MPI_VENC_ReleaseStream)
   gst_buffer_unmap(gstFrame->output_buffer, &outputMapInfo);
   if (GST_FLOW_OK != gst_video_encoder_finish_frame(encoder, gstFrame))
     return FALSE; // FIXME: error check
