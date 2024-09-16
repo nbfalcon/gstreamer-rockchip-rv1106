@@ -1,0 +1,8 @@
+* TODO RKMPI
+** TODO Configurable properties
+- [ ] GOP
+- [ ] QP
+** TODO Keyframes, IDR, etc..
+** TODO other formats (HEVC, JPEG)
+** TODO width, height, *3, *2, is wrong somewhere!!
+
