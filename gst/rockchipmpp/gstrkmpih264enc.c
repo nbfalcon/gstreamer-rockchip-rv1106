@@ -44,7 +44,7 @@ struct _GstRKMPIH264Enc {
   VENC_STREAM_S stFrame;
   MB_POOL src_Pool;
   MB_BLK src_Blk;
-  void *src_BlkVir;
+  void *src_BlkMMAP;
 
   RK_U32 frameCounter;
 
@@ -210,8 +210,10 @@ static gboolean gst_rkmpi_enc_set_src_caps(GstVideoEncoder *encoder,
   GstVideoCodecState *output_state;
 
   GstCaps *caps = gst_caps_new_empty_simple(media_type);
-  gst_caps_set_simple(caps, "width", G_TYPE_INT, GST_VIDEO_INFO_WIDTH(info),
-                      "height", G_TYPE_INT, GST_VIDEO_INFO_HEIGHT(info), NULL);
+  gst_caps_set_simple(caps, "stream-format", G_TYPE_STRING, "byte-stream",
+                      "alignment", G_TYPE_STRING, "nalu", "width", G_TYPE_INT,
+                      GST_VIDEO_INFO_WIDTH(info), "height", G_TYPE_INT,
+                      GST_VIDEO_INFO_HEIGHT(info), NULL);
 
   GST_DEBUG_OBJECT(self, "output caps: %" GST_PTR_FORMAT, caps);
 
@@ -233,7 +235,7 @@ static gboolean gst_rkmpi_h264_enc_set_format(GstVideoEncoder *encoder,
   self->frameCounter = 0;
 
   const RK_U32 width = GST_VIDEO_INFO_WIDTH(&self->info),
-         height = GST_VIDEO_INFO_HEIGHT(&self->info);
+               height = GST_VIDEO_INFO_HEIGHT(&self->info);
 
   MB_POOL_CONFIG_S pool_cfg;
   memset(&pool_cfg, 0, sizeof(MB_POOL_CONFIG_S));
@@ -244,7 +246,7 @@ static gboolean gst_rkmpi_h264_enc_set_format(GstVideoEncoder *encoder,
   self->src_Pool = RK_MPI_MB_CreatePool(&pool_cfg);
   RK_MPI_ERROR_CHECK_NULL(self->src_Pool, RK_MPI_MB_CreatePool)
   self->src_Blk = RK_MPI_MB_GetMB(self->src_Pool, width * height * 3, RK_TRUE);
-  self->src_BlkVir = RK_MPI_MB_Handle2VirAddr(self->src_Blk);
+  self->src_BlkMMAP = RK_MPI_MB_Handle2VirAddr(self->src_Blk);
 
   VENC_CHN_ATTR_S stAttr;
   memset(&stAttr, 0, sizeof(VENC_CHN_ATTR_S));
@@ -263,7 +265,7 @@ static gboolean gst_rkmpi_h264_enc_set_format(GstVideoEncoder *encoder,
 
   stAttr.stRcAttr.enRcMode = VENC_RC_MODE_H264CBR;
   stAttr.stRcAttr.stH264Cbr.u32BitRate = 3 * 1024;
-  stAttr.stRcAttr.stH264Cbr.u32Gop = 1;
+  stAttr.stRcAttr.stH264Cbr.u32Gop = 10;
   RK_MPI_VENC_CreateChn(chnId, &stAttr);
 
   VENC_RECV_PIC_PARAM_S stRecvParam;
@@ -281,6 +283,18 @@ static gboolean gst_rkmpi_h264_enc_set_format(GstVideoEncoder *encoder,
 static gboolean gst_rkmpi_h264_enc_stop(GstVideoEncoder *encoder) {
   GstRKMPIH264Enc *self = GST_RKMPIH264ENC(encoder);
 
+  // FIXME: error check?
+  RK_MPI_VENC_StopRecvFrame(chnId);
+  RK_MPI_VENC_DestroyChn(chnId);
+
+  RK_MPI_MB_ReleaseMB(self->src_Blk);
+  RK_MPI_MB_DestroyPool(self->src_Pool);
+
+  RK_MPI_SYS_Exit();
+
+  gst_video_codec_state_unref(self->state);
+  GST_DEBUG_OBJECT(self, "stopped");
+
   return TRUE;
 }
 
@@ -292,8 +306,9 @@ static GstFlowReturn gst_rkmpi_h264_handle_frame(GstVideoEncoder *encoder,
   GstMapInfo inputMapInfo;
   if (!gst_buffer_map(gstFrame->input_buffer, &inputMapInfo, GST_MAP_READ))
     return GST_FLOW_ERROR; // FIXME: log error
-  memcpy(self->src_BlkVir, inputMapInfo.data, inputMapInfo.size);
-  // FIXME: sync
+  memcpy(self->src_BlkMMAP, inputMapInfo.data, inputMapInfo.size);
+  rkret = RK_MPI_SYS_MmzFlushCache(self->src_Blk, RK_FALSE);
+  RK_MPI_ERROR_CHECK(RK_MPI_SYS_MmzFlushCache)
   gst_buffer_unmap(gstFrame->input_buffer, &inputMapInfo);
 
   RK_U32 width = GST_VIDEO_INFO_WIDTH(&self->info),
