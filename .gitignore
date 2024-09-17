@@ -38,8 +38,8 @@ INSTALL
 *.lo
 *.la
 *.o
-Makefile.in
-Makefile
+# Makefile.in
+# Makefile
 *~
 *.swp
 *.gc??
