@@ -1,33 +1,20 @@
-/*
- * Copyright 2018 Rockchip Electronics Co. LTD
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- */
+// License: GPLv3
 #include <gst/gst.h>
 #include <gst/video/gstvideoencoder.h>
+#include <glib/gqueue.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "rk_mpi_mb.h"
+#include "rk_mpi_mmz.h"
 #include "rk_mpi_sys.h"
 #include "rk_mpi_venc.h"
 
 static uint64_t monotonic_micros() {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (uint64_t)(ts.tv_sec * 1000 * 1000) + (ts.tv_nsec / 1000);
+  return (uint64_t) (ts.tv_sec * 1000 * 1000) + (ts.tv_nsec / 1000);
 }
 
 #define GST_CAT_DEFAULT gstrkpmpih264
@@ -38,18 +25,36 @@ typedef struct _GstRKMPIH264EncClass GstRKMPIH264EncClass;
 
 #define chnId 0
 
-struct _GstRKMPIH264Enc {
-  GstVideoEncoder parent;
+// We need to do this dance because g_async_queue_push cannot accept NULL pointers
+struct QueuedGstFrame {
+  GstVideoCodecFrame *frame_or_null;
+  uint32_t u32SeqNo;
+};
 
-  VENC_STREAM_S stFrame;
+static struct QueuedGstFrame *queued_gst_frame_new(GstVideoCodecFrame *frame, uint32_t seqno) {
+  struct QueuedGstFrame *ret = g_malloc(sizeof(struct QueuedGstFrame));
+  ret->frame_or_null = frame;
+  ret->u32SeqNo = seqno;
+  return ret;
+}
+
+struct _GstRKMPIH264Enc {
+  // Gstreamer
+  GstVideoEncoder parent;
+  GstVideoCodecState *state;
+  GstVideoInfo info;
+
+  // State
+  _Atomic uint32_t input_frame_counter;
+  // What buffer do we expect to be dequeued next?
+  _Atomic uint32_t output_frame_counter;
+  /// Type: QueuedGstFrame
+  GAsyncQueue *gstframe_queue;
+
+  // Source image (1)
   MB_POOL src_Pool;
   MB_BLK src_Blk;
   void *src_BlkMMAP;
-
-  RK_U32 frameCounter;
-
-  GstVideoCodecState *state;
-  GstVideoInfo info;
 };
 
 struct _GstRKMPIH264EncClass {
@@ -71,25 +76,16 @@ G_DEFINE_TYPE(GstRKMPIH264Enc, gst_rkmpi_h264enc, GST_TYPE_VIDEO_ENCODER)
   (G_TYPE_INSTANCE_GET_CLASS((obj), GST_TYPE_RKMPIH264ENC,                     \
                              GstRKMPIH264EncClass))
 
-static GstFlowReturn gst_rkmpi_h264_enc_handle_frame(GstVideoEncoder *encoder,
-                                                     GstVideoCodecFrame *frame);
-static gboolean gst_rkmpi_h264_enc_start(GstVideoEncoder *encoder);
-static gboolean gst_rkmpi_h264_enc_stop(GstVideoEncoder *encoder);
-static gboolean gst_rkmpi_h264_enc_set_format(GstVideoEncoder *encoder,
-                                              GstVideoCodecState *state);
-static GstFlowReturn gst_rkmpi_h264_handle_frame(GstVideoEncoder *self,
-                                                 GstVideoCodecFrame *frame);
-
 #define GST_RKMPI_H264ENC_SIZE_CAPS                                            \
   "width  = (int) [ 96, MAX ], height = (int) [ 64, MAX ]"
 static GstStaticPadTemplate gst_rkmpi_h264enc_src_template =
     GST_STATIC_PAD_TEMPLATE(
         "src", GST_PAD_SRC, GST_PAD_ALWAYS,
         GST_STATIC_CAPS("video/x-h264, " GST_RKMPI_H264ENC_SIZE_CAPS ","
-                        "stream-format = (string) { byte-stream }, "
-                        "alignment = (string) { au }, "
-                        "profile = (string) { baseline, main, high }"));
-static GstStaticPadTemplate gst_rkmpih264_enc_sink_template =
+                                                                     "stream-format = (string) { byte-stream }, "
+                                                                     "alignment = (string) { au }, "
+                                                                     "profile = (string) { baseline, main, high }"));
+static GstStaticPadTemplate gst_rkmpih264enc_sink_template =
     GST_STATIC_PAD_TEMPLATE(
         "sink", GST_PAD_SINK, GST_PAD_ALWAYS,
         GST_STATIC_CAPS("video/x-raw,"
@@ -100,12 +96,20 @@ static void gst_rkmpi_h264enc_init(GstRKMPIH264Enc *element) {
   GstRKMPIH264Enc *self = GST_RKMPIH264ENC(element);
 }
 
+static gboolean gst_rkmpi_h264enc_start(GstVideoEncoder *encoder);
+static gboolean gst_rkmpi_h264enc_stop(GstVideoEncoder *encoder);
+static gboolean gst_rkmpi_h264enc_set_format(GstVideoEncoder *encoder,
+                                             GstVideoCodecState *state);
+static GstFlowReturn gst_rkmpi_h264enc_finish(GstVideoEncoder *encoder);
+static GstFlowReturn gst_rkmpi_h264enc_handle_frame(GstVideoEncoder *self,
+                                                    GstVideoCodecFrame *frame);
 static void gst_rkmpi_h264enc_class_init(GstRKMPIH264EncClass *klass) {
   GstVideoEncoderClass *video_encoder = GST_VIDEO_ENCODER_CLASS(klass);
-  video_encoder->start = gst_rkmpi_h264_enc_start;
-  video_encoder->stop = gst_rkmpi_h264_enc_stop;
-  video_encoder->set_format = gst_rkmpi_h264_enc_set_format;
-  video_encoder->handle_frame = gst_rkmpi_h264_handle_frame;
+  video_encoder->start = gst_rkmpi_h264enc_start;
+  video_encoder->stop = gst_rkmpi_h264enc_stop;
+  video_encoder->finish = gst_rkmpi_h264enc_finish; // FIXME: maybe implement flush?
+  video_encoder->set_format = gst_rkmpi_h264enc_set_format;
+  video_encoder->handle_frame = gst_rkmpi_h264enc_handle_frame;
 
   GstElementClass *element_class = GST_ELEMENT_CLASS(klass);
   gst_element_class_add_pad_template(
@@ -113,7 +117,7 @@ static void gst_rkmpi_h264enc_class_init(GstRKMPIH264EncClass *klass) {
       gst_static_pad_template_get(&gst_rkmpi_h264enc_src_template));
   gst_element_class_add_pad_template(
       element_class,
-      gst_static_pad_template_get(&gst_rkmpih264_enc_sink_template));
+      gst_static_pad_template_get(&gst_rkmpih264enc_sink_template));
   gst_element_class_set_static_metadata(
       element_class, "Rockchip Rockcit H264 Encoder", "Codec/Encoder/Video",
       "Encode video streams via Rockchip rockit/RKMPI",
@@ -165,6 +169,11 @@ static struct gst_rkmpi_format {
     fprintf(stderr, "rockit MPI: %s failed (%d)\n", #name, rkret);             \
     return GST_FLOW_ERROR;                                                     \
   }
+#define RK_MPI_ERROR_CHECKV(name)                                               \
+  if (rkret != RK_SUCCESS) {                                                   \
+    fprintf(stderr, "rockit MPI: %s failed (%d)\n", #name, rkret);             \
+    return;                                                     \
+  }
 #define RK_MPI_ERROR_CHECK2(name)                                              \
   if (rkret != RK_SUCCESS) {                                                   \
     fprintf(stderr, "rockit MPI: %s failed (%d)\n", #name, rkret);             \
@@ -176,7 +185,14 @@ static struct gst_rkmpi_format {
     return FALSE;                                                              \
   }
 
-static gboolean gst_rkmpi_h264_enc_start(GstVideoEncoder *encoder) {
+static void gstvideocodecframe_unref2(void *frame) {
+  // We can push null
+  if (frame) {
+    gst_video_codec_frame_unref((GstVideoCodecFrame *) frame);
+  }
+}
+
+static gboolean gst_rkmpi_h264enc_start(GstVideoEncoder *encoder) {
   GstRKMPIH264Enc *self = GST_RKMPIH264ENC(encoder);
 
   RK_S32 rkret;
@@ -186,6 +202,9 @@ static gboolean gst_rkmpi_h264_enc_start(GstVideoEncoder *encoder) {
   RK_MPI_ERROR_CHECK2(RK_MPI_SYS_Init)
 
   gst_video_info_init(&self->info);
+  // FIXME: is this type of cast legal?
+  self->gstframe_queue = g_async_queue_new_full(gstvideocodecframe_unref2);
+  // FIXME: NULLCHECK queue alloc
 
   return TRUE;
 }
@@ -226,16 +245,58 @@ static gboolean gst_rkmpi_enc_set_src_caps(GstVideoEncoder *encoder,
   return gst_video_encoder_negotiate(encoder);
 }
 
-static gboolean gst_rkmpi_h264_enc_set_format(GstVideoEncoder *encoder,
-                                              GstVideoCodecState *state) {
+static void gst_rkmpi_buffer_loop(gpointer encoder) {
+  GstRKMPIH264Enc *self = GST_RKMPIH264ENC(encoder);
+
+  // Next frame we expect
+  struct QueuedGstFrame *gst_frame_w = g_async_queue_pop(self->gstframe_queue); // FIXME: this can block forever
+  GstVideoCodecFrame *gst_frame = gst_frame_w->frame_or_null;
+  uint32_t frame_seqno = gst_frame_w->u32SeqNo;
+  g_free(gst_frame_w);
+  if (!gst_frame)
+    return; // Poison pill
+
+  // Get response bitstream
+  RK_S32 rkret;
+  VENC_PACK_S pack;
+  VENC_STREAM_S stFrame;
+  stFrame.pstPack = &pack; // This is actually an array, but we have size 1
+  stFrame.u32PackCount = 1;
+  stFrame.u32Seq = self->output_frame_counter++;
+  rkret = RK_MPI_VENC_GetStream(0, &stFrame, -1);
+  RK_MPI_ERROR_CHECKV(RK_MPI_VENC_GetStream)
+
+  gst_println("rkmpi: successfully dequeued stream packet %d (expect %d, length %d)",
+              stFrame.u32Seq,
+              frame_seqno,
+              stFrame.pstPack->u32Len);
+
+  // Output to new buffer
+  if (GST_FLOW_OK != gst_video_encoder_allocate_output_frame(
+      encoder, gst_frame, stFrame.pstPack->u32Len))
+    return; // FIXME: unmap, error logging
+  GstMapInfo outputMapInfo;
+  if (!gst_buffer_map(gst_frame->output_buffer, &outputMapInfo, GST_MAP_WRITE))
+    return; // FIXME: error check
+  void *response_data = RK_MPI_MB_Handle2VirAddr(stFrame.pstPack->pMbBlk);
+  memcpy(outputMapInfo.data, response_data, stFrame.pstPack->u32Len);
+  rkret = RK_MPI_VENC_ReleaseStream(chnId, &stFrame);
+  RK_MPI_ERROR_CHECKV(RK_MPI_VENC_ReleaseStream)
+  gst_buffer_unmap(gst_frame->output_buffer, &outputMapInfo);
+  if (GST_FLOW_OK != gst_video_encoder_finish_frame(encoder, gst_frame))
+    return; // FIXME: error check;
+}
+
+static gboolean gst_rkmpi_h264enc_set_format(GstVideoEncoder *encoder,
+                                             GstVideoCodecState *state) {
   GstRKMPIH264Enc *self = GST_RKMPIH264ENC(encoder);
 
   self->state = gst_video_codec_state_ref(state);
   self->info = state->info;
-  self->frameCounter = 0;
+  self->output_frame_counter = self->input_frame_counter = 0;
 
   const RK_U32 width = GST_VIDEO_INFO_WIDTH(&self->info),
-               height = GST_VIDEO_INFO_HEIGHT(&self->info);
+      height = GST_VIDEO_INFO_HEIGHT(&self->info);
 
   MB_POOL_CONFIG_S pool_cfg;
   memset(&pool_cfg, 0, sizeof(MB_POOL_CONFIG_S));
@@ -259,7 +320,7 @@ static gboolean gst_rkmpi_h264_enc_set_format(GstVideoEncoder *encoder,
   stAttr.stVencAttr.u32PicHeight = height;
   stAttr.stVencAttr.u32VirWidth = width;
   stAttr.stVencAttr.u32VirHeight = height;
-  stAttr.stVencAttr.u32StreamBufCnt = 2;
+  stAttr.stVencAttr.u32StreamBufCnt = 1;
   stAttr.stVencAttr.u32BufSize = width * height * 3 / 2;
   stAttr.stVencAttr.enMirror = MIRROR_NONE;
 
@@ -273,18 +334,35 @@ static gboolean gst_rkmpi_h264_enc_set_format(GstVideoEncoder *encoder,
   stRecvParam.s32RecvPicNum = -1;
   RK_MPI_VENC_StartRecvFrame(chnId, &stRecvParam);
 
-  self->frameCounter = 0;
-  self->state = gst_video_codec_state_ref(state);
-  self->info = state->info;
+  gst_pad_start_task(encoder->srcpad, gst_rkmpi_buffer_loop, self, NULL);
 
   return gst_rkmpi_enc_set_src_caps(encoder, "video/x-h264");
 }
 
-static gboolean gst_rkmpi_h264_enc_stop(GstVideoEncoder *encoder) {
+static GstFlowReturn gst_rkmpi_h264enc_finish(GstVideoEncoder *encoder) {
   GstRKMPIH264Enc *self = GST_RKMPIH264ENC(encoder);
 
-  // FIXME: error check?
-  RK_MPI_VENC_StopRecvFrame(chnId);
+  RK_S32 rkret;
+  rkret = RK_MPI_VENC_StopRecvFrame(chnId);
+  // Hey, please generate the EOS bitstream
+  RK_MPI_ERROR_CHECK(RK_MPI_VENC_StopRecvFrame);
+
+  if (gst_pad_get_task_state(encoder->srcpad) == GST_TASK_STARTED) {
+    g_async_queue_push(self->gstframe_queue, queued_gst_frame_new(NULL, -1));
+    // NOTE: Wait what, UNLOCK then LOCK??? This looks horrible, but just seems to be how you do things in Gstreamer
+    // https://gitlab.freedesktop.org/gstreamer/gst-plugins-good/-/blob/6525abfc63917e3f92e359f68a02cf65c8fda7d8/sys/v4l2/gstv4l2videoenc.c#L271
+    GST_VIDEO_ENCODER_STREAM_UNLOCK(encoder);
+    if (!gst_pad_stop_task(encoder->srcpad))
+      return GST_FLOW_ERROR;
+    GST_VIDEO_ENCODER_STREAM_LOCK(encoder);
+  }
+
+  return GST_FLOW_OK;
+}
+
+static gboolean gst_rkmpi_h264enc_stop(GstVideoEncoder *encoder) {
+  GstRKMPIH264Enc *self = GST_RKMPIH264ENC(encoder);
+
   RK_MPI_VENC_DestroyChn(chnId);
 
   RK_MPI_MB_ReleaseMB(self->src_Blk);
@@ -298,21 +376,21 @@ static gboolean gst_rkmpi_h264_enc_stop(GstVideoEncoder *encoder) {
   return TRUE;
 }
 
-static GstFlowReturn gst_rkmpi_h264_handle_frame(GstVideoEncoder *encoder,
-                                                 GstVideoCodecFrame *gstFrame) {
+static GstFlowReturn gst_rkmpi_h264enc_handle_frame(GstVideoEncoder *encoder,
+                                                    GstVideoCodecFrame *frame) {
   GstRKMPIH264Enc *self = GST_RKMPIH264ENC(encoder);
   RK_S32 rkret = 0;
 
   GstMapInfo inputMapInfo;
-  if (!gst_buffer_map(gstFrame->input_buffer, &inputMapInfo, GST_MAP_READ))
+  if (!gst_buffer_map(frame->input_buffer, &inputMapInfo, GST_MAP_READ))
     return GST_FLOW_ERROR; // FIXME: log error
   memcpy(self->src_BlkMMAP, inputMapInfo.data, inputMapInfo.size);
   rkret = RK_MPI_SYS_MmzFlushCache(self->src_Blk, RK_FALSE);
   RK_MPI_ERROR_CHECK(RK_MPI_SYS_MmzFlushCache)
-  gst_buffer_unmap(gstFrame->input_buffer, &inputMapInfo);
+  gst_buffer_unmap(frame->input_buffer, &inputMapInfo);
 
   RK_U32 width = GST_VIDEO_INFO_WIDTH(&self->info),
-         height = GST_VIDEO_INFO_HEIGHT(&self->info);
+      height = GST_VIDEO_INFO_HEIGHT(&self->info);
   VIDEO_FRAME_INFO_S h264_frame;
   h264_frame.stVFrame.u32Width = width;
   h264_frame.stVFrame.u32Height = height;
@@ -323,33 +401,13 @@ static GstFlowReturn gst_rkmpi_h264_handle_frame(GstVideoEncoder *encoder,
     return FALSE;
   h264_frame.stVFrame.u32FrameFlag = 160;
   h264_frame.stVFrame.pMbBlk = self->src_Blk;
-  h264_frame.stVFrame.u32TimeRef = self->frameCounter++;
-  h264_frame.stVFrame.u64PTS = monotonic_micros();
+  uint32_t next_frame_counter = self->input_frame_counter++;
+  h264_frame.stVFrame.u32TimeRef = self->input_frame_counter;
+  h264_frame.stVFrame.u64PTS = monotonic_micros(); // FIXME: frame->pts
 
+  g_async_queue_push(self->gstframe_queue, queued_gst_frame_new(frame, next_frame_counter));
   rkret = RK_MPI_VENC_SendFrame(chnId, &h264_frame, -1);
   RK_MPI_ERROR_CHECK(RK_MPI_VENC_SendFrame)
-
-  // Get response bitstream
-  VENC_STREAM_S stFrame;
-  stFrame.pstPack = (VENC_PACK_S *)malloc(sizeof(VENC_PACK_S));
-  rkret = RK_MPI_VENC_GetStream(0, &stFrame, -1);
-  RK_MPI_ERROR_CHECK(RK_MPI_VENC_GetStream)
-
-  // Output to new buffer
-  if (GST_FLOW_OK != gst_video_encoder_allocate_output_frame(
-                         encoder, gstFrame, stFrame.pstPack->u32Len))
-    return FALSE; // FIXME: unmap, error logging
-  GstMapInfo outputMapInfo;
-  if (!gst_buffer_map(gstFrame->output_buffer, &outputMapInfo, GST_MAP_WRITE))
-    return FALSE; // FIXME: error check
-  void *response_data = RK_MPI_MB_Handle2VirAddr(stFrame.pstPack->pMbBlk);
-  memcpy(outputMapInfo.data, response_data, stFrame.pstPack->u32Len);
-  // FIXME: dma_buf_sync??
-  rkret = RK_MPI_VENC_ReleaseStream(chnId, &stFrame);
-  RK_MPI_ERROR_CHECK(RK_MPI_VENC_ReleaseStream)
-  gst_buffer_unmap(gstFrame->output_buffer, &outputMapInfo);
-  if (GST_FLOW_OK != gst_video_encoder_finish_frame(encoder, gstFrame))
-    return GST_FLOW_ERROR; // FIXME: error check
 
   return GST_FLOW_OK;
 }
