@@ -14,7 +14,7 @@
 static uint64_t monotonic_micros() {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (uint64_t) (ts.tv_sec * 1000 * 1000) + (ts.tv_nsec / 1000);
+  return (uint64_t)(ts.tv_sec * 1000 * 1000) + (ts.tv_nsec / 1000);
 }
 
 #define GST_CAT_DEFAULT gstrkpmpih264
@@ -76,6 +76,51 @@ G_DEFINE_TYPE(GstRKMPIH264Enc, gst_rkmpi_h264enc, GST_TYPE_VIDEO_ENCODER)
   (G_TYPE_INSTANCE_GET_CLASS((obj), GST_TYPE_RKMPIH264ENC,                     \
                              GstRKMPIH264EncClass))
 
+#define GST_RK_ALIST_XMACRO(X, XLAST) \
+  X(NV12, RK_FMT_YUV420SP) \
+  X(NV12_10LE32, RK_FMT_YUV420SP_10BIT) \
+  X(NV16, RK_FMT_YUV422SP) \
+  X(P010_10LE, RK_FMT_YUV422SP_10BIT) \
+  X(I420, RK_FMT_YUV420P) \
+  X(YV12, RK_FMT_YUV420P_VU) \
+  X(NV21, RK_FMT_YUV420SP_VU) \
+  X(Y42B, RK_FMT_YUV422P) \
+  X(VYUY, RK_FMT_YUV422SP_VU) \
+  X(YUY2, RK_FMT_YUV422_YUYV) \
+  X(UYVY, RK_FMT_YUV422_UYVY) \
+  X(GRAY8, RK_FMT_YUV400SP) \
+  X(Y444, RK_FMT_YUV444) \
+  X(RGB16, RK_FMT_RGB565) \
+  X(BGR16, RK_FMT_BGR565) \
+  X(RGB15, RK_FMT_RGB555) \
+  X(BGR15, RK_FMT_BGR555) \
+  X(RGB, RK_FMT_RGB888) \
+  X(BGR, RK_FMT_BGR888) \
+  X(ARGB, RK_FMT_ARGB8888) \
+  X(ABGR, RK_FMT_ABGR8888) \
+  X(BGRA, RK_FMT_BGRA8888) \
+  X(RGBA, RK_FMT_RGBA8888) \
+  X(YVYU, RK_FMT_YUV422_YVYU) \
+  X(VYUY, RK_FMT_YUV422_VYUY) \
+  X(NV16, RK_FMT_YUV422SP) \
+  X(NV61, RK_FMT_YUV422SP_VU) \
+  X(NV24, RK_FMT_YUV444SP) \
+  X(RGB16, RK_FMT_RGB565) \
+  XLAST(BGR16, RK_FMT_BGR565)
+// FIXME: there are some missing entries. Also, some of these might be
+// ChatGPT hallucinated
+// FIXME: Bayer formats
+
+#define GST_RK_ALIST_E(gst, rk) { GST_VIDEO_FORMAT_ ## gst, rk },
+static struct gst_rkmpi_format {
+  GstVideoFormat gst_format;
+  PIXEL_FORMAT_E rkmpi_format;
+  const char *gst_string;
+} GST_RKMPI_FORMAT_ALIST[] = {
+    GST_RK_ALIST_XMACRO(GST_RK_ALIST_E, GST_RK_ALIST_E)
+};
+
+
 #define GST_RKMPI_H264ENC_SIZE_CAPS                                            \
   "width  = (int) [ 96, MAX ], height = (int) [ 64, MAX ]"
 static GstStaticPadTemplate gst_rkmpi_h264enc_src_template =
@@ -85,12 +130,14 @@ static GstStaticPadTemplate gst_rkmpi_h264enc_src_template =
                                                                      "stream-format = (string) { byte-stream }, "
                                                                      "alignment = (string) { au }, "
                                                                      "profile = (string) { baseline, main, high }"));
+#define GST_RK_ALIST_CAPS_E(gst, rk) #gst ", "
+#define GST_RK_ALIST_CAPS_L(gst, rk) #gst
 static GstStaticPadTemplate gst_rkmpih264enc_sink_template =
     GST_STATIC_PAD_TEMPLATE(
         "sink", GST_PAD_SINK, GST_PAD_ALWAYS,
-        GST_STATIC_CAPS("video/x-raw,"
-                        "format = (string) { RGB, NV24, Y444 "
-                        "}, " GST_RKMPI_H264ENC_SIZE_CAPS));
+        GST_STATIC_CAPS("video/x-raw, "
+                        "format = (string) { " GST_RK_ALIST_XMACRO(GST_RK_ALIST_CAPS_E, GST_RK_ALIST_CAPS_L) " }, "
+                        GST_RKMPI_H264ENC_SIZE_CAPS));
 
 static void gst_rkmpi_h264enc_init(GstRKMPIH264Enc *element) {
   GstRKMPIH264Enc *self = GST_RKMPIH264ENC(element);
@@ -123,45 +170,6 @@ static void gst_rkmpi_h264enc_class_init(GstRKMPIH264EncClass *klass) {
       "Encode video streams via Rockchip rockit/RKMPI",
       "Nikita <nikblos@outlook.com>");
 }
-
-static struct gst_rkmpi_format {
-  GstVideoFormat gst_format;
-  PIXEL_FORMAT_E rkmpi_format;
-} GST_RKMPI_FORMAT_ALIST[] = {
-    {GST_VIDEO_FORMAT_NV12, RK_FMT_YUV420SP},
-    {GST_VIDEO_FORMAT_NV12_10LE32, RK_FMT_YUV420SP_10BIT},
-    {GST_VIDEO_FORMAT_NV16, RK_FMT_YUV422SP},
-    {GST_VIDEO_FORMAT_P010_10LE, RK_FMT_YUV422SP_10BIT},
-    {GST_VIDEO_FORMAT_I420, RK_FMT_YUV420P},
-    {GST_VIDEO_FORMAT_YV12, RK_FMT_YUV420P_VU},
-    {GST_VIDEO_FORMAT_NV21, RK_FMT_YUV420SP_VU},
-    {GST_VIDEO_FORMAT_Y42B, RK_FMT_YUV422P},
-    {GST_VIDEO_FORMAT_VYUY, RK_FMT_YUV422SP_VU},
-    {GST_VIDEO_FORMAT_YUY2, RK_FMT_YUV422_YUYV},
-    {GST_VIDEO_FORMAT_UYVY, RK_FMT_YUV422_UYVY},
-    {GST_VIDEO_FORMAT_GRAY8, RK_FMT_YUV400SP},
-    {GST_VIDEO_FORMAT_Y444, RK_FMT_YUV444},
-    {GST_VIDEO_FORMAT_RGB16, RK_FMT_RGB565},
-    {GST_VIDEO_FORMAT_BGR16, RK_FMT_BGR565},
-    {GST_VIDEO_FORMAT_RGB15, RK_FMT_RGB555},
-    {GST_VIDEO_FORMAT_BGR15, RK_FMT_BGR555},
-    {GST_VIDEO_FORMAT_RGB, RK_FMT_RGB888},
-    {GST_VIDEO_FORMAT_BGR, RK_FMT_BGR888},
-    {GST_VIDEO_FORMAT_ARGB, RK_FMT_ARGB8888},
-    {GST_VIDEO_FORMAT_ABGR, RK_FMT_ABGR8888},
-    {GST_VIDEO_FORMAT_BGRA, RK_FMT_BGRA8888},
-    {GST_VIDEO_FORMAT_RGBA, RK_FMT_RGBA8888},
-    {GST_VIDEO_FORMAT_YVYU, RK_FMT_YUV422_YVYU},
-    {GST_VIDEO_FORMAT_VYUY, RK_FMT_YUV422_VYUY},
-    {GST_VIDEO_FORMAT_NV16, RK_FMT_YUV422SP},
-    {GST_VIDEO_FORMAT_NV61, RK_FMT_YUV422SP_VU},
-    {GST_VIDEO_FORMAT_NV24, RK_FMT_YUV444SP},
-    {GST_VIDEO_FORMAT_RGB16, RK_FMT_RGB565},
-    {GST_VIDEO_FORMAT_BGR16, RK_FMT_BGR565},
-    // FIXME: there are some missing entries. Also, some of these might be
-    // ChatGPT hallucinated
-    // FIXME: Bayer formats
-};
 
 #define COUNTOF(x) (sizeof(x) / sizeof((x)[0]))
 #define RK_MPI_ERROR_CHECK(name)                                               \
@@ -297,16 +305,17 @@ static gboolean gst_rkmpi_h264enc_set_format(GstVideoEncoder *encoder,
 
   const RK_U32 width = GST_VIDEO_INFO_WIDTH(&self->info),
       height = GST_VIDEO_INFO_HEIGHT(&self->info);
+  const RK_U32 size = GST_VIDEO_INFO_SIZE(&self->info);
 
   MB_POOL_CONFIG_S pool_cfg;
   memset(&pool_cfg, 0, sizeof(MB_POOL_CONFIG_S));
-  pool_cfg.u64MBSize = width * height * 3;
+  pool_cfg.u64MBSize = size;
   pool_cfg.u32MBCnt = 1;
   pool_cfg.enAllocType = MB_ALLOC_TYPE_DMA;
   // PoolCfg.bPreAlloc = RK_FALSE;
   self->src_Pool = RK_MPI_MB_CreatePool(&pool_cfg);
   RK_MPI_ERROR_CHECK_NULL(self->src_Pool, RK_MPI_MB_CreatePool)
-  self->src_Blk = RK_MPI_MB_GetMB(self->src_Pool, width * height * 3, RK_TRUE);
+  self->src_Blk = RK_MPI_MB_GetMB(self->src_Pool, size, RK_TRUE);
   self->src_BlkMMAP = RK_MPI_MB_Handle2VirAddr(self->src_Blk);
 
   VENC_CHN_ATTR_S stAttr;
