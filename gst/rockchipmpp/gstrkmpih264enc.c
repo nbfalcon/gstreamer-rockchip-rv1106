@@ -320,13 +320,13 @@ static gboolean gst_rkmpi_h264enc_set_format(GstVideoEncoder *encoder,
   stAttr.stVencAttr.u32PicHeight = height;
   stAttr.stVencAttr.u32VirWidth = width;
   stAttr.stVencAttr.u32VirHeight = height;
-  stAttr.stVencAttr.u32StreamBufCnt = 1;
-  stAttr.stVencAttr.u32BufSize = width * height * 3 / 2;
+  stAttr.stVencAttr.u32StreamBufCnt = 2;
+  stAttr.stVencAttr.u32BufSize = 0; // Doesn't actually matter for some reason
   stAttr.stVencAttr.enMirror = MIRROR_NONE;
 
-  stAttr.stRcAttr.enRcMode = VENC_RC_MODE_H264CBR;
+  stAttr.stRcAttr.enRcMode = VENC_RC_MODE_H264VBR;
   stAttr.stRcAttr.stH264Cbr.u32BitRate = 3 * 1024;
-  stAttr.stRcAttr.stH264Cbr.u32Gop = 10;
+  stAttr.stRcAttr.stH264Cbr.u32Gop = 4000;
   RK_MPI_VENC_CreateChn(chnId, &stAttr);
 
   VENC_RECV_PIC_PARAM_S stRecvParam;
@@ -399,7 +399,7 @@ static GstFlowReturn gst_rkmpi_h264enc_handle_frame(GstVideoEncoder *encoder,
   if (!gst_gst2rkmpi_format(&h264_frame.stVFrame.enPixelFormat,
                             GST_VIDEO_INFO_FORMAT(&self->info)))
     return FALSE;
-  h264_frame.stVFrame.u32FrameFlag = 160;
+  h264_frame.stVFrame.u32FrameFlag = 0;
   h264_frame.stVFrame.pMbBlk = self->src_Blk;
   uint32_t next_frame_counter = self->input_frame_counter++;
   h264_frame.stVFrame.u32TimeRef = self->input_frame_counter;
