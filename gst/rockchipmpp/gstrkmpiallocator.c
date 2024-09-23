@@ -33,6 +33,7 @@ typedef struct _GstRkmpiAllocatorClass {
 G_DEFINE_TYPE(GstRkmpiAllocator, gst_rkmpi_allocator, GST_TYPE_ALLOCATOR)
 
 struct GstRkmpiMemory {
+  GstMemory parent;
   // The MB_BLK we got from the MB_POOL.
   MB_BLK blk;
 
@@ -44,15 +45,7 @@ struct GstRkmpiMemory {
   VIDEO_FRAME_INFO_S viInfo;
 };
 
-static GQuark gst_rkmpi_memory_quark(void) {
-  static GQuark quark = 0;
-  if (quark == 0) // FIXME: locking?? This is racy...
-    quark = g_quark_from_static_string("rkmpi-memory");
-  return quark;
-}
-#define GST_RKMPI_MEMORY(mem)                                                  \
-  (struct GstRkmpiMemory *)gst_mini_object_get_qdata(GST_MINI_OBJECT(mem),     \
-                                                     gst_rkmpi_memory_quark())
+#define GST_RKMPI_MEMORY(mem) (struct GstRkmpiMemory *)mem
 
 static gpointer gst_rkmpi_allocator_mem_map(GstMemory *mem, gsize maxsize,
                                             GstMapFlags flags) {
@@ -79,6 +72,26 @@ static void gst_rkmpi_allocator_free(GstAllocator *allocator, GstMemory *mem) {
   GST_ALLOCATOR_CLASS(parent_class)->free(allocator, mem);
 }
 
+static GstMemory *gst_rkmpi_allocator_make_mem_import(GstRkmpiAllocator *self, MB_BLK blk,
+                                            const VIDEO_FRAME_INFO_S *vInfo,
+                                            gsize size) {
+  // NOTE: How do we set a custom memory type? We don't. gst_memory_new_wrapped
+  // doesn't either, and it does have a custom allocator.
+
+  struct GstRkmpiMemory *xmem = g_malloc0(sizeof(struct GstRkmpiMemory));
+  gst_memory_init(&xmem->parent, 0, GST_ALLOCATOR(self), NULL,
+                  self->pool_config.u64MBSize, 4096, 0, size);
+
+  xmem->blk = blk;
+  xmem->haveViInfo = FALSE;
+  if (vInfo) {
+    xmem->haveViInfo = TRUE;
+    xmem->viInfo = *vInfo;
+  }
+
+  return (GstMemory *)xmem;
+}
+
 // RKMPI memory allocation function
 static GstMemory *gst_rkmpi_allocator_alloc(GstAllocator *allocator, gsize size,
                                             GstAllocationParams *params) {
@@ -93,19 +106,7 @@ static GstMemory *gst_rkmpi_allocator_alloc(GstAllocator *allocator, gsize size,
   MB_BLK blk = RK_MPI_MB_GetMB(self->pool, size, RK_FALSE);
   if (!blk)
     return NULL;
-
-  // How do we set a custom memory type?
-  GstMemory *mem = g_malloc0(sizeof(GstMemory));
-  gst_memory_init(mem, 0, allocator, NULL, self->pool_config.u64MBSize, 4096, 0,
-                  size);
-
-  struct GstRkmpiMemory *xmem = g_malloc0(sizeof(struct GstRkmpiMemory));
-  xmem->blk = blk;
-  xmem->haveViInfo = FALSE;
-  gst_mini_object_set_qdata(GST_MINI_OBJECT(mem), gst_rkmpi_memory_quark(),
-                            xmem, g_free);
-
-  return mem;
+  return gst_rkmpi_allocator_make_mem_import(self, blk, NULL, size);
 }
 
 static void gst_rkmpi_allocator_finalize(GObject *obj) {
@@ -135,32 +136,13 @@ static void gst_rkmpi_allocator_init(GstRkmpiAllocator *self) {
 }
 
 GstMemory *gst_rkmpi_allocator_import_mb(GstRkmpiAllocator *self, MB_BLK blk) {
-  GstAllocator *allocator = GST_ALLOCATOR_CAST(self);
-
-  GstMemory *mem = g_malloc0(sizeof(GstMemory));
-  gst_memory_init(mem, 0, allocator, NULL, self->pool_config.u64MBSize, 4096, 0,
-                  RK_MPI_MB_GetSize(blk));
-
-  struct GstRkmpiMemory *xmem = g_malloc0(sizeof(struct GstRkmpiMemory));
-  xmem->blk = blk;
-  xmem->haveViInfo = FALSE;
-  gst_mini_object_set_qdata(GST_MINI_OBJECT(mem), gst_rkmpi_memory_quark(),
-                            xmem, g_free);
-
-  return NULL;
+  return gst_rkmpi_allocator_make_mem_import(self, blk, NULL, RK_MPI_MB_GetSize(blk));
 }
 
 GstMemory *gst_rkmpi_allocator_import_viframe(GstRkmpiAllocator *self,
                                               const VIDEO_FRAME_INFO_S *info) {
-  GstMemory *mem = gst_rkmpi_allocator_import_mb(self, info->stVFrame.pMbBlk);
-  if (!mem)
-    return NULL;
-
-  struct GstRkmpiMemory *xmem = GST_RKMPI_MEMORY(mem);
-  xmem->haveViInfo = TRUE;
-  xmem->viInfo = *info;
-
-  return mem;
+  MB_BLK blk = info->stVFrame.pMbBlk;
+  return gst_rkmpi_allocator_make_mem_import(self, blk, info, RK_MPI_MB_GetSize(blk));
 }
 
 /// An allocator that only supports _import()
