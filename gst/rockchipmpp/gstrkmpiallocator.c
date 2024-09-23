@@ -51,7 +51,7 @@ static gpointer gst_rkmpi_allocator_mem_map(GstMemory *mem, gsize maxsize,
                                             GstMapFlags flags) {
   struct GstRkmpiMemory *self = GST_RKMPI_MEMORY(mem);
 
-  return RK_MPI_MB_VirAddr2Handle(self->blk);
+  return RK_MPI_MB_Handle2VirAddr(self->blk);
 }
 
 static void gst_rkmpi_allocator_mem_unmap(GstMemory *mem) {
