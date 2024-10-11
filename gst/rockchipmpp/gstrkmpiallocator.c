@@ -1,21 +1,24 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <gst/allocators/allocators.h>
 #include <gst/gst.h>
 #include <gst/gstmemory.h>
 
+#include "gstrkmpiallocator.h"
 #include "rk_mpi_mb.h"
 #include "rk_mpi_sys.h"
 #include "rk_mpi_vi.h"
 
-typedef struct _GstRkmpiAllocator {
+struct _GstRkmpiAllocator {
   GstAllocator parent;
 
   MB_POOL pool;
   MB_POOL_CONFIG_S pool_config;
-} GstRkmpiAllocator;
+};
 
-typedef struct _GstRkmpiAllocatorClass {
+typedef struct _GstRkmpiAllocatorClass GstRkmpiAllocatorClass;
+struct _GstRkmpiAllocatorClass {
   GstAllocatorClass parent_class;
-} GstRkmpiAllocatorClass;
+};
 
 #define GST_TYPE_RKMPI_ALLOCATOR (gst_rkmpi_allocator_get_type())
 #define GST_RKMPI_ALLOCATOR(obj)                                               \
@@ -45,7 +48,7 @@ struct GstRkmpiMemory {
   VIDEO_FRAME_INFO_S viInfo;
 };
 
-#define GST_RKMPI_MEMORY(mem) (struct GstRkmpiMemory *)mem
+#define GST_RKMPI_MEMORY(mem) ((struct GstRkmpiMemory *)mem)
 
 static gpointer gst_rkmpi_allocator_mem_map(GstMemory *mem, gsize maxsize,
                                             GstMapFlags flags) {
@@ -113,6 +116,7 @@ static void gst_rkmpi_allocator_finalize(GObject *obj) {
   GstRkmpiAllocator *self = GST_RKMPI_ALLOCATOR(obj);
 
   if (self->pool) {
+    // FIXME: Maybe check if there are any leaked allocations?
     RK_MPI_MB_DestroyPool(self->pool);
   }
   G_OBJECT_CLASS(parent_class)->finalize(obj);
@@ -129,10 +133,11 @@ static void gst_rkmpi_allocator_class_init(GstRkmpiAllocatorClass *klass) {
 
 static void gst_rkmpi_allocator_init(GstRkmpiAllocator *self) {
   GstAllocator *allocator = GST_ALLOCATOR_CAST(self);
+  allocator->mem_type = GST_RKMPI_ALLOCATOR_NAME;
   allocator->mem_map = gst_rkmpi_allocator_mem_map;
   allocator->mem_unmap = gst_rkmpi_allocator_mem_unmap;
 
-  self->pool = 0; // FIXME: is this ok
+  self->pool = 0;
 }
 
 GstMemory *gst_rkmpi_allocator_import_mb(GstRkmpiAllocator *self, MB_BLK blk) {
@@ -169,4 +174,13 @@ GstRkmpiAllocator *gst_rkmpi_allocator_new_pool(gsize size, gsize count) {
   alloc->pool = pool;
   alloc->pool_config = pool_config;
   return alloc;
+}
+
+MB_BLK gst_rkmpi_allocator_mem_get_mb(GstMemory *mem) {
+  if (!gst_memory_is_type(mem, GST_RKMPI_ALLOCATOR_NAME)) {
+    gst_printerr("Expected rockchip-rkmpi memory!");
+    return NULL;
+  }
+
+  return GST_RKMPI_MEMORY(mem)->blk;
 }

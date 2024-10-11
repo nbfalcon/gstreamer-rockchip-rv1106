@@ -6,10 +6,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gstrkmpiallocator.h"
 #include "rk_mpi_mb.h"
 #include "rk_mpi_mmz.h"
 #include "rk_mpi_sys.h"
 #include "rk_mpi_venc.h"
+#include "rk_mpi_vi.h"
 
 static uint64_t monotonic_micros() {
   struct timespec ts;
@@ -44,10 +46,11 @@ struct _GstRKMPIH264Enc {
   GstVideoCodecState *state;
   GstVideoInfo info;
 
-  // State
+  // What buffer do we expect to dequee next
   _Atomic uint32_t input_frame_counter;
-  // What buffer do we expect to be dequeued next?
+  // Next sequence number for buffer
   _Atomic uint32_t output_frame_counter;
+  uint32_t frame_counter;
   /// Type: QueuedGstFrame
   GAsyncQueue *gstframe_queue;
 
@@ -324,6 +327,7 @@ static gboolean gst_rkmpi_h264enc_set_format(GstVideoEncoder *encoder,
   if (!gst_gst2rkmpi_format(&stAttr.stVencAttr.enPixelFormat,
                             GST_VIDEO_INFO_FORMAT(&self->info)))
     return FALSE;
+  stAttr.stGopAttr.enGopMode = VENC_GOPMODE_NORMALP;
   stAttr.stVencAttr.u32Profile = H264E_PROFILE_MAIN;
   stAttr.stVencAttr.u32PicWidth = width;
   stAttr.stVencAttr.u32PicHeight = height;
@@ -390,17 +394,28 @@ static GstFlowReturn gst_rkmpi_h264enc_handle_frame(GstVideoEncoder *encoder,
   GstRKMPIH264Enc *self = GST_RKMPIH264ENC(encoder);
   RK_S32 rkret = 0;
 
-  GstMapInfo inputMapInfo;
-  if (!gst_buffer_map(frame->input_buffer, &inputMapInfo, GST_MAP_READ))
-    return GST_FLOW_ERROR; // FIXME: log error
-  memcpy(self->src_BlkMMAP, inputMapInfo.data, inputMapInfo.size);
-  rkret = RK_MPI_SYS_MmzFlushCache(self->src_Blk, RK_FALSE);
-  RK_MPI_ERROR_CHECK(RK_MPI_SYS_MmzFlushCache)
-  gst_buffer_unmap(frame->input_buffer, &inputMapInfo);
+  MB_BLK blk = NULL;
+  if (gst_buffer_n_memory(frame->input_buffer) == 1) {
+    GstMemory *dma_mem = gst_buffer_get_memory(frame->input_buffer, 1);
+    if (gst_memory_is_type(dma_mem, GST_RKMPI_ALLOCATOR_NAME)) {
+      blk = gst_rkmpi_allocator_mem_get_mb(dma_mem);
+    }
+  }
+  if (!blk) {
+    GstMapInfo inputMapInfo;
+    if (!gst_buffer_map(frame->input_buffer, &inputMapInfo, GST_MAP_READ))
+      return GST_FLOW_ERROR; // FIXME: log error
+    memcpy(self->src_BlkMMAP, inputMapInfo.data, inputMapInfo.size);
+    rkret = RK_MPI_SYS_MmzFlushCache(self->src_Blk, RK_FALSE);
+    RK_MPI_ERROR_CHECK(RK_MPI_SYS_MmzFlushCache)
+    gst_buffer_unmap(frame->input_buffer, &inputMapInfo);
+    blk = self->src_Blk;
+  }
 
   RK_U32 width = GST_VIDEO_INFO_WIDTH(&self->info),
       height = GST_VIDEO_INFO_HEIGHT(&self->info);
   VIDEO_FRAME_INFO_S h264_frame;
+  memset(&h264_frame, 0, sizeof(VIDEO_FRAME_INFO_S));
   h264_frame.stVFrame.u32Width = width;
   h264_frame.stVFrame.u32Height = height;
   h264_frame.stVFrame.u32VirWidth = width;
@@ -409,12 +424,12 @@ static GstFlowReturn gst_rkmpi_h264enc_handle_frame(GstVideoEncoder *encoder,
                             GST_VIDEO_INFO_FORMAT(&self->info)))
     return FALSE;
   h264_frame.stVFrame.u32FrameFlag = 0;
-  h264_frame.stVFrame.pMbBlk = self->src_Blk;
-  uint32_t next_frame_counter = self->input_frame_counter++;
-  h264_frame.stVFrame.u32TimeRef = self->input_frame_counter;
-  h264_frame.stVFrame.u64PTS = monotonic_micros(); // FIXME: frame->pts
+  h264_frame.stVFrame.pMbBlk = blk;
+  h264_frame.stVFrame.u32TimeRef = self->output_frame_counter; // FIXME: gstreamer
+  h264_frame.stVFrame.u64PTS = frame->pts;
 
-  g_async_queue_push(self->gstframe_queue, queued_gst_frame_new(frame, next_frame_counter));
+  g_async_queue_push(self->gstframe_queue, queued_gst_frame_new(frame, self->output_frame_counter));
+  self->output_frame_counter++;
   rkret = RK_MPI_VENC_SendFrame(chnId, &h264_frame, -1);
   RK_MPI_ERROR_CHECK(RK_MPI_VENC_SendFrame)
 

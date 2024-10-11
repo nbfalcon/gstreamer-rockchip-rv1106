@@ -18,7 +18,7 @@ DEFS += -DGST_PACKAGE_NAME=$(GST_PACKAGE_NAME) -DGST_PACKAGE_ORIGIN='"Cobbled to
 DEFS += -DUNUSED='__attribute__((unused))'
 DEFS += -DHAVE_RGA=1
 
-OBJECTS = gstmpp.o gstmppallocator.o gstmppalphadecodebin.o gstmppdec.o gstmppenc.o gstmpph264enc.o gstmpph265enc.o gstmppjpegdec.o gstmppjpegenc.o gstmppvideodec.o gstmppvp8enc.o gstmppvpxalphadecodebin.o gstrkaiqsrc.o gstrgaconvert.o gstrkmpih264enc.o
+OBJECTS = gstmpp.o gstmppallocator.o gstmppalphadecodebin.o gstmppdec.o gstmppenc.o gstmpph264enc.o gstmpph265enc.o gstmppjpegdec.o gstmppjpegenc.o gstmppvideodec.o gstmppvp8enc.o gstmppvpxalphadecodebin.o gstrkaiqsrc.o gstrgaconvert.o gstrkmpih264enc.o gstrkmpi_common.o gstrkmpiallocator.o
 DEPS = gstreamer-1.0 gstreamer-base-1.0 gstreamer-allocators-1.0 gstreamer-video-1.0 gstreamer-pbutils-1.0
 
 CFLAGS += -fPIC
